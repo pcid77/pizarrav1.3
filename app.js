@@ -1,4 +1,4 @@
-const STORAGE_KEY = "infinite-board-v4";
+const STORAGE_KEY = "infinite-board-v5";
 
 const state = {
   boards: {},
@@ -111,14 +111,22 @@ function bindUI() {
 
 function importJson(raw) {
   try {
-    const parsed = JSON.parse(raw);
+    const trimmed = raw.trim();
+    if (!trimmed) throw new Error("No hay contenido para importar.");
+
+    let parsed;
+    if (looksLikeJson(trimmed)) {
+      parsed = JSON.parse(trimmed);
+    } else {
+      parsed = parseTsvBoard(trimmed);
+    }
 
     if (Array.isArray(parsed)) {
-      applyImportedBoard({ name: "Importado JSON", nodes: parsed, connections: [] });
+      applyImportedBoard({ name: "Importado", nodes: parsed, connections: [] });
     } else if (parsed.nodes) {
       applyImportedBoard(parsed);
     } else {
-      throw new Error("Formato no soportado. Usa {name,nodes,connections} o un array de nodos.");
+      throw new Error("Formato no soportado. Usa JSON {name,nodes,connections} o TSV con cabecera.");
     }
 
     els.jsonMessage.textContent = "Importación correcta.";
@@ -129,6 +137,53 @@ function importJson(raw) {
   } catch (err) {
     els.jsonMessage.textContent = `Error: ${err.message}`;
   }
+}
+
+function looksLikeJson(value) {
+  return value.startsWith("{") || value.startsWith("[");
+}
+
+function parseTsvBoard(tsvRaw) {
+  const lines = tsvRaw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length < 2) throw new Error("TSV incompleto. Incluye cabecera y al menos una fila.");
+
+  const headers = lines[0].split("	").map((h) => h.trim().toLowerCase());
+  const rows = lines.slice(1).map((line) => {
+    const cols = line.split("	");
+    const row = {};
+    headers.forEach((h, i) => { row[h] = (cols[i] || "").trim(); });
+    return row;
+  });
+
+  const nodes = rows.map((r, i) => {
+    const type = r.type || "note";
+    const base = {
+      id: r.id || crypto.randomUUID(),
+      type,
+      x: Number(r.x) || 120 + i * 24,
+      y: Number(r.y) || 100 + i * 24,
+      width: Number(r.width) || 320,
+      height: Number(r.height) || (type === "timeline" ? 240 : 200),
+      pillScale: Number(r.pillscale) || 1,
+      title: r.title || { note: "Nota", image: "Imagen", video: "Video", timeline: "Línea de tiempo" }[type] || "Nota",
+      data: {},
+    };
+
+    if (type === "note") base.data.text = r.text || "";
+    if (type === "image") base.data.url = r.url || "";
+    if (type === "video") base.data.url = r.url || "";
+    if (type === "timeline") {
+      base.data.items = [];
+      if (r.date) base.data.items.push({ kind: "event", label: r.label || r.title || "Evento", date: r.date });
+      if (r.start && r.end) {
+        base.data.items.push({ kind: "period", label: r.label || r.title || "Periodo", start: r.start, end: r.end });
+      }
+    }
+
+    return base;
+  });
+
+  return { name: "Importado TSV", nodes, connections: [] };
 }
 
 function applyImportedBoard(boardData) {
@@ -142,6 +197,7 @@ function applyImportedBoard(boardData) {
     height: Number.isFinite(n.height) ? n.height : n.type === "timeline" ? 220 : 190,
     title: n.title || { note: "Nota", image: "Imagen", video: "Video", timeline: "Línea de tiempo" }[n.type || "note"],
     data: n.data || {},
+    pillScale: Number.isFinite(n.pillScale) ? n.pillScale : 1,
   }));
 
   const validIds = new Set(nodes.map((n) => n.id));
@@ -276,18 +332,41 @@ function renderBoard() {
   board.nodes.forEach((node) => {
     const el = els.nodeTemplate.content.firstElementChild.cloneNode(true);
     el.dataset.id = node.id;
+    el.dataset.type = node.type;
     el.style.left = `${node.x}px`;
     el.style.top = `${node.y}px`;
     el.style.width = `${node.width || 320}px`;
     el.style.height = `${node.height || 200}px`;
     el.querySelector(".title").textContent = node.title;
     if (state.connectFrom === node.id) el.classList.add("selected-for-connection");
+    el.style.setProperty("--pill-scale", node.pillScale || 1);
 
     const content = el.querySelector(".content");
-    if (node.type === "note") content.textContent = node.data.text || "";
+    if (node.type === "note") content.innerHTML = `<div class="note-pill">${escapeHtml(node.data.text || "")}</div>`;
     if (node.type === "image") content.innerHTML = `<img src="${node.data.url}" alt="Imagen" />`;
     if (node.type === "video") content.innerHTML = videoEmbed(node.data.url);
     if (node.type === "timeline") content.append(timeline(node.data.items || []));
+
+
+    const canResizePill = node.type === "note" || node.type === "timeline";
+    const smallerBtn = el.querySelector(".pill-smaller");
+    const biggerBtn = el.querySelector(".pill-bigger");
+    smallerBtn.style.display = canResizePill ? "inline-block" : "none";
+    biggerBtn.style.display = canResizePill ? "inline-block" : "none";
+    if (canResizePill) {
+      smallerBtn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        node.pillScale = Math.max(0.7, (node.pillScale || 1) - 0.1);
+        save();
+        renderBoard();
+      });
+      biggerBtn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        node.pillScale = Math.min(1.8, (node.pillScale || 1) + 0.1);
+        save();
+        renderBoard();
+      });
+    }
 
     el.querySelector(".delete").addEventListener("click", (ev) => {
       ev.stopPropagation();
@@ -369,6 +448,17 @@ function timeline(items) {
 
   wrap.append(track);
   return wrap;
+}
+
+
+function escapeHtml(value) {
+  const text = String(value);
+  return text
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 function parseDate(value) {
