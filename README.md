@@ -30,13 +30,3 @@ python3 -m http.server 4173
 
 Luego visita `http://localhost:4173`.
 
-
-## Guardar en Google Drive (Google Sites)
-
-Puedes conectar la app a un **Web App de Google Apps Script** que guarde/cargue el JSON en tu Drive:
-
-- Pega la URL del Web App en `URL Web App (Apps Script)`.
-- Usa **Guardar en Drive** y **Cargar de Drive**.
-- El webhook se recuerda en el navegador (`pizarra-drive-webhook`).
-
-> Nota: En Google Sites normalmente necesitas desplegar el Web App con permisos adecuados y CORS habilitado.
