@@ -36,17 +36,43 @@ const els = {
   jsonMessage: document.getElementById("jsonMessage"),
   cancelJson: document.getElementById("cancelJson"),
   undoBtn: document.getElementById("undoBtn"),
+  saveFile: document.getElementById("saveFile"),
+  loadFile: document.getElementById("loadFile"),
+  loadFileInput: document.getElementById("loadFileInput"),
+  driveWebhook: document.getElementById("driveWebhook"),
+  saveDrive: document.getElementById("saveDrive"),
+  loadDrive: document.getElementById("loadDrive"),
 };
 
 init();
 
-function init() {
+async function init() {
   load();
-  if (!Object.keys(state.boards).length) createBoard("Proyecto principal", { skipUndo: true });
+  if (els.driveWebhook) els.driveWebhook.value = localStorage.getItem("pizarra-drive-webhook") || "";
+  if (!Object.keys(state.boards).length) {
+    const seeded = await seedDefaultBoard();
+    if (!seeded) createBoard("Proyecto principal", { skipUndo: true });
+  }
   bindUI();
   renderBoards();
   renderBoard();
   updateUndoButton();
+}
+
+
+async function seedDefaultBoard() {
+  try {
+    const res = await fetch("default-board.json", { cache: "no-store" });
+    if (!res.ok) return false;
+    const boardData = await res.json();
+    if (!boardData || typeof boardData !== "object" || !Array.isArray(boardData.nodes)) return false;
+    applyImportedBoard(boardData, { pushUndo: false });
+    save();
+    return true;
+  } catch (err) {
+    console.warn("No se pudo cargar la pizarra por defecto", err);
+    return false;
+  }
 }
 
 function bindUI() {
@@ -75,6 +101,13 @@ function bindUI() {
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") save();
   });
+
+  els.saveFile?.addEventListener("click", saveToFile);
+  els.loadFile?.addEventListener("click", () => els.loadFileInput?.click());
+  els.loadFileInput?.addEventListener("change", loadFromFile);
+  els.saveDrive?.addEventListener("click", saveToDrive);
+  els.loadDrive?.addEventListener("click", loadFromDrive);
+  els.driveWebhook?.addEventListener("change", () => localStorage.setItem("pizarra-drive-webhook", (els.driveWebhook.value || "").trim()));
 
   let panning = false;
   let start = { x: 0, y: 0 };
@@ -709,6 +742,115 @@ function applyViewport() {
   els.connections.style.transform = t;
 }
 
+
+
+function buildSerializableState() {
+  return {
+    boards: state.boards,
+    activeBoardId: state.activeBoardId,
+    viewport: state.viewport,
+    updatedAt: Date.now(),
+    app: "Pizarra Claustro Criminología",
+  };
+}
+
+function saveToFile() {
+  try {
+    const payload = buildSerializableState();
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    a.href = url;
+    a.download = `pizarra-claustro-${stamp}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    alert("Archivo de respaldo descargado.");
+  } catch (err) {
+    alert(`Error guardando archivo: ${err.message}`);
+  }
+}
+
+async function loadFromFile(ev) {
+  const input = ev.target;
+  const file = input?.files?.[0];
+  if (!file) return;
+
+  try {
+    const text = await file.text();
+    const parsed = JSON.parse(text);
+    if (!parsed || typeof parsed !== "object" || !parsed.boards) {
+      throw new Error("Formato de archivo inválido.");
+    }
+
+    pushUndoState();
+    state.boards = parsed.boards || {};
+    state.activeBoardId = parsed.activeBoardId || Object.keys(state.boards)[0] || null;
+    state.viewport = parsed.viewport || state.viewport;
+    save();
+    renderBoards();
+    renderBoard();
+    alert("Pizarra cargada desde archivo.");
+  } catch (err) {
+    alert(`Error cargando archivo: ${err.message}`);
+  } finally {
+    input.value = "";
+  }
+}
+
+
+async function saveToDrive() {
+  const webhook = (els.driveWebhook?.value || "").trim();
+  if (!webhook) {
+    alert("Configura la URL del Web App de Google Apps Script.");
+    return;
+  }
+  try {
+    const payload = buildSerializableState();
+    const res = await fetch(webhook, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "save", payload }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    localStorage.setItem("pizarra-drive-webhook", webhook);
+    alert("Pizarra guardada en Google Drive.");
+  } catch (err) {
+    alert(`Error guardando en Drive: ${err.message}`);
+  }
+}
+
+async function loadFromDrive() {
+  const webhook = (els.driveWebhook?.value || "").trim();
+  if (!webhook) {
+    alert("Configura la URL del Web App de Google Apps Script.");
+    return;
+  }
+  try {
+    const res = await fetch(`${webhook}${webhook.includes("?") ? "&" : "?"}action=load`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const parsed = await res.json();
+    const payload = parsed.payload || parsed;
+    if (!payload || typeof payload !== "object" || !payload.boards) {
+      throw new Error("Respuesta de Drive inválida.");
+    }
+
+    pushUndoState();
+    state.boards = payload.boards || {};
+    state.activeBoardId = payload.activeBoardId || Object.keys(state.boards)[0] || null;
+    state.viewport = payload.viewport || state.viewport;
+    localStorage.setItem("pizarra-drive-webhook", webhook);
+    save();
+    renderBoards();
+    renderBoard();
+    alert("Pizarra cargada desde Google Drive.");
+  } catch (err) {
+    alert(`Error cargando desde Drive: ${err.message}`);
+  }
+}
+
 function load() {
   let parsed = null;
 
@@ -749,7 +891,7 @@ function save() {
 
 
 /***************************************
- * IMPORT / EXPORT JSON + TSV (PEGAR TAL CUAL)
+ * IMPORT / EXPORT JSON + TSV
  ***************************************/
 (() => {
   const btnOpen = document.getElementById("openJsonImport");
